@@ -14,6 +14,10 @@ use App\Product;
 use App\Sku;
 use App\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use phpDocumentor\Reflection\Types\Integer;
 
 class OrderController extends Controller
 {
@@ -45,52 +49,50 @@ class OrderController extends Controller
      */
     public function store(StoreOrderRequest $request)
     {
+//        Log::info('hahaha');
         if ($address = Address::find($request->address_id)) {
             if ($address->user_id != $request->user_id) {
                 return response()->json([
-                    'data' => '用户不存在！'
+                    'data' => '地址中的用户信息与传递的用户信息不匹配'
                 ]);
             }
-            $carts = Cart::whereIn('id', $request->cart_id)
-                ->where('user_id', $request->user_id)
-                ->where('status', '10')->get();
-            $arr = array();
-            $quantity = [];
-            $orders = [];
-            foreach ($carts as $cart) {
-                $code = '';
-                for ($i = 0; $i < 32; $i++) {         //通过循环指定长度
-                    $randcode = mt_rand(0, 9);     //指定为数字
-                    $code .= $randcode;
-                }
-                $sku = Sku::where('id', $cart->id)->where('status', '10')->first();
-                $arr[$sku->product_id][] = $sku;
-                $quantity[$sku->product_id][] = $cart->quantity;
-            }
-            foreach ($arr as $key => $val) {
-                $code = '';
-                for ($i = 0; $i < 32; $i++) {         //通过循环指定长度
-                    $randcode = mt_rand(0, 9);     //指定为数字
-                    $code .= $randcode;
-                }
+            DB::beginTransaction();
+            try {
+                $order_items = [];
                 $product_fee = 0;
                 $weight = 0;
-                $express_fee = 0;
-                foreach ($val as $k => $v) {
-                    $skuInfo = Sku::where('status', '10')->find($v->id);
-                    $cart_quantity = $quantity[$key][$k];
-                    if (($skuInfo->quantity - $cart_quantity) >= 0) {
-                        $product = Product::where('status', '10')->find($v->product_id);
-                        $express = Express::where('status', '10')->find($product->express_id);
-                        $product_fee += $cart_quantity * $skuInfo->price;
-                        $weight += $cart_quantity * $skuInfo->weight;
+                $carts = Cart::whereIn('id', $request->cart_id)
+                    ->where('status', '10')->get();
+                foreach ($carts as $cart) {
+                    if ($cart->user_id != $request->user_id) {
+                        return response()->json([
+                            'data' => '购物车中的用户信息与传递的用户信息不匹配'
+                        ]);
                     }
+                    $sku = Sku::where('id', $cart->sku_id)->where('status', '10')->first();
+                    $product = Product::where('status', '10')->find($sku->product_id);
+                    $express = Express::where('status', '10')->find($product->express_id);
+                    if (($sku->quantity - $cart->quantity >= 0)) {
+                        $product_fee += $sku->price * $cart->quantity;
+                        $weight += $sku->weight * $cart->quantity;
+                    }
+                    $order_item = [
+                        'product_id' => $product->id,
+                        'product_full_name' => $product->name . $sku->version,
+                        'sku_id' => $sku->id,
+                        'quantity' => $cart->quantity,
+                        'price' => $sku->price
+                    ];
+                    array_push($order_items, $order_item);
                 }
                 if ($product_fee < $express->min_money) {
-                    $express_fee = (ceil($weight / 1000)) * 6;
+                    $express_fee = (ceil($weight / $express->weight)) * $express->fee;
+                } else {
+                    $express_fee = 0;
                 }
+                $number = Str::random(32);
                 $order = Order::create([
-                    'number' => $code,
+                    'number' => $number,
                     'user_id' => $request->user_id,
                     'product_fee' => $product_fee,
                     'express_fee' => $express_fee,
@@ -102,24 +104,25 @@ class OrderController extends Controller
                     'receiver_detail' => $address->detail,
                     'receiver_mobile' => $address->mobile,
                 ]);
-                array_push($orders, $order);
-                foreach ($val as $k => $v) {
-                    $order_item = Order_item::create([
-                        'order_id' => $order->id,
-                        'product_id' => $v->product_id,
-                        'product_full_name' => $product->name . $v->version,
-                        'sku_id' => $v->id,
-                        'quantity' => $quantity[$key][$k],
-                        'price' => $v->price
-                    ]);
+                foreach ($order_items as $order_item) {
+                    $order_item ['order_id'] = $order->id;
+                    $order_item = Order_item::create($order_item, true);
                 }
+                DB::commit();
+                return response()->json([
+                    'data' => $order
+                ], 201);
+            } catch (\Exception $e) {
+                //接收异常处理并回滚
+                DB::rollBack();
+                return [
+                    'status' => $e->getCode(),
+                    'msg' => $e->getMessage()
+                ];
             }
-            return response()->json([
-                'data' => $orders
-            ], 201);
         }
         return response()->json([
-            'data' => '下单失败'
+            'data' => '地址不存在'
         ], 409);
     }
 
@@ -166,5 +169,19 @@ class OrderController extends Controller
     public function destroy(Order $order)
     {
         //
+    }
+
+    /**
+     * 计算商品运费
+     *
+     * @param 购物车对象集合
+     * @return
+     */
+    public function express_fee($carts)
+    {
+        $product_fee = 0;
+        $weight = 0;
+        $express_fee = 0;
+        return $carts;
     }
 }
